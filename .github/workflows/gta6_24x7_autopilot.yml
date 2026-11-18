@@ -1,0 +1,23 @@
+name: GTA 6 24x7 Autonomous Clipper (10-20 Clips/Day)
+
+on:
+  schedule:
+    - cron: '0 */1 * * *'
+  workflow_dispatch:
+
+jobs:
+  clip-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          pip install yt-dlp requests
+      - name: Run One Zero-Touch Clip & Publish Cycle
+        env:
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          YT_TOKEN_POOL_JSON: ${{ secrets.YT_TOKEN_POOL_JSON }}
+        run: python3 server_24x7.py --daily-target 16 --once
