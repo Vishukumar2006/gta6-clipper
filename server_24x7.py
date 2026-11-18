@@ -3,9 +3,9 @@
 GTA 6 24/7 Zero-Human-Interaction Auto-Clipper & Live YouTube Shorts Uploader
 =============================================================================
 End-to-end production script for GitHub Actions (24/7 Free Cloud) & Android Termux:
-  1. Discovers trending/live GTA 6 videos via yt-dlp ytsearch (0 API quota units)
-     and optional YouTube Channel RSS feeds.
-  2. Downloads a 35-second action clip with yt-dlp.
+  1. Discovers trending/live GTA 6 videos via YouTube RSS feeds & yt-dlp ytsearch (0 API quota).
+  2. Downloads a 35-second action clip with yt-dlp (supports optional YT_COOKIES_TXT secret
+     plus mobile/TV player_client fallback to bypass datacenter bot checks).
   3. Optionally generates a 3-second ElevenLabs Flash v2.5 hook voiceover.
   4. Renders a 9:16 vertical Short (1080x1920) with a 3-second curiosity hook banner via FFmpeg.
   5. Refreshes OAuth2 access_token from YT_TOKEN_POOL_JSON (rotating across multiple projects
@@ -30,7 +30,6 @@ DEFAULT_CHANNELS = [
     "UC-m3-82mlHuRWR0yoXnZlcg",
 ]
 
-# Automatic 0-quota YouTube search queries used by yt-dlp to find fresh GTA 6 streams/clips
 SEARCH_QUERIES = [
     "GTA 6 gameplay highlights",
     "GTA VI trailer breakdown",
@@ -47,9 +46,8 @@ HOOK_TEMPLATES = [
 
 
 def fetch_rss_videos(channel_id: str) -> List[Dict[str, str]]:
-    """Fetches latest videos from a YouTube channel RSS feed (0 API quota cost)."""
     url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
-    resp = requests.get(url, headers={"User-Agent": "GTA6-AutoClipper/3.1"}, timeout=15)
+    resp = requests.get(url, headers={"User-Agent": "GTA6-AutoClipper/3.2"}, timeout=15)
     resp.raise_for_status()
     return parse_youtube_rss(resp.text)
 
@@ -70,7 +68,6 @@ def parse_youtube_rss(xml_payload: str) -> List[Dict[str, str]]:
 
 
 def discover_via_ytdlp_search(query: str, limit: int = 5) -> List[Dict[str, str]]:
-    """Zero-quota YouTube discovery via yt-dlp ytsearch (no API key or channel ID required)."""
     cmd = [
         "yt-dlp",
         "--flat-playlist",
@@ -95,35 +92,54 @@ def discover_via_ytdlp_search(query: str, limit: int = 5) -> List[Dict[str, str]
     return results
 
 
-def download_clip_segment(video_id: str, out_raw_mp4: str) -> str:
-    """Downloads a 35-second clip segment using yt-dlp (capped at 720p for fast cloud/mobile render)."""
+def _prepare_cookies_file(tmp_dir: str) -> Optional[str]:
+    raw_cookies = os.environ.get("YT_COOKIES_TXT", "").strip()
+    if not raw_cookies:
+        return None
+    cookie_path = os.path.join(tmp_dir, "cookies.txt")
+    with open(cookie_path, "w", encoding="utf-8") as f:
+        f.write(raw_cookies + "\n")
+    print("[YT-DLP] Loaded YT_COOKIES_TXT secret for authenticated download.")
+    return cookie_path
+
+
+def download_clip_segment(video_id: str, out_raw_mp4: str, tmp_dir: str) -> str:
+    """Downloads a clip using yt-dlp with cookies (if provided) and player_client fallbacks."""
     video_url = f"https://www.youtube.com/watch?v={video_id}"
-    cmd = [
-        "yt-dlp",
-        "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best",
-        "--merge-output-format", "mp4",
-        "--download-sections", "*0:00:10-0:00:45",
-        "--force-keyframes-at-cuts",
-        "-o", out_raw_mp4,
-        video_url,
+    cookie_file = _prepare_cookies_file(tmp_dir)
+    base_extra: List[str] = []
+    if cookie_file:
+        base_extra.extend(["--cookies", cookie_file])
+
+    # Try multiple player clients to avoid datacenter bot-check blocks
+    client_attempts = [
+        ["--extractor-args", "youtube:player_client=android_vr,tv_embedded"],
+        ["--extractor-args", "youtube:player_client=ios,mweb"],
+        [],
     ]
-    print(f"[YT-DLP] Downloading 35s clip from {video_url}...")
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0 or not os.path.exists(out_raw_mp4):
-        fallback_cmd = [
+
+    last_err = ""
+    for client_args in client_attempts:
+        cmd = [
             "yt-dlp",
-            "-f", "best[height<=720][ext=mp4]/best",
+            *base_extra,
+            *client_args,
+            "-f", "best[height<=720][ext=mp4]/best[ext=mp4]/best",
+            "--no-playlist",
+            "--max-filesize", "80M",
             "-o", out_raw_mp4,
             video_url,
         ]
-        proc2 = subprocess.run(fallback_cmd, capture_output=True, text=True)
-        if proc2.returncode != 0 or not os.path.exists(out_raw_mp4):
-            raise RuntimeError(f"yt-dlp failed: {proc2.stderr[-400:]}")
-    return out_raw_mp4
+        print(f"[YT-DLP] Downloading clip from {video_url} ({' '.join(client_args) or 'default'})...")
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode == 0 and os.path.exists(out_raw_mp4):
+            return out_raw_mp4
+        last_err = proc.stderr[-400:] if proc.stderr else "unknown yt-dlp error"
+
+    raise RuntimeError(f"yt-dlp failed across all clients: {last_err}")
 
 
 def synthesize_elevenlabs_hook(hook_text: str, out_mp3: str) -> Optional[str]:
-    """Generates a 3-second narrated hook via ElevenLabs Flash v2.5 if ELEVENLABS_API_KEY is set."""
     api_key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
     if not api_key:
         print("[TTS] ELEVENLABS_API_KEY not set — using original audio + visual hook banner.")
@@ -143,7 +159,6 @@ def synthesize_elevenlabs_hook(hook_text: str, out_mp3: str) -> Optional[str]:
 
 
 def render_vertical_short(raw_mp4: str, hook_mp3: Optional[str], hook_text: str, out_mp4: str) -> str:
-    """Renders a 9:16 (1080x1920) vertical Short with blurred backdrop, zoom, and 3s hook banner."""
     safe_hook = hook_text.replace("'", "").replace(":", " -")
     font_candidates = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -163,7 +178,7 @@ def render_vertical_short(raw_mp4: str, hook_mp3: Optional[str], hook_text: str,
         "box=1:boxcolor=black@0.85:boxborderw=22:x=(w-text_w)/2:y=260:enable='between(t,0,3.5)'[outv]"
     )
 
-    cmd = ["ffmpeg", "-y", "-i", raw_mp4, "-t", "40"]
+    cmd = ["ffmpeg", "-y", "-i", raw_mp4, "-t", "38"]
     if hook_mp3 and os.path.exists(hook_mp3):
         cmd.extend(["-i", hook_mp3])
         vfilter += ";[1:a][0:a]amix=inputs=2:duration=longest[outa]"
@@ -188,7 +203,6 @@ def render_vertical_short(raw_mp4: str, hook_mp3: Optional[str], hook_text: str,
 
 
 def refresh_youtube_access_token(cred: Dict[str, str]) -> str:
-    """Exchanges permanent OAuth refresh_token for a fresh YouTube Data API v3 access_token."""
     resp = requests.post(
         "https://oauth2.googleapis.com/token",
         data={
@@ -205,7 +219,6 @@ def refresh_youtube_access_token(cred: Dict[str, str]) -> str:
 
 
 def upload_youtube_short(mp4_path: str, title: str, description: str, token_pool: List[Dict[str, str]]) -> str:
-    """Uploads the 9:16 MP4 to YouTube Shorts via videos.insert, rotating across OAuth projects."""
     boundary = "gta6_autoclipper_boundary_9x16"
     metadata = {
         "snippet": {
@@ -284,7 +297,6 @@ def run_live_cycle() -> int:
         except Exception as exc:
             print(f"[RSS WARN] Could not fetch channel {ch}: {exc}")
 
-    # Automatic zero-quota YouTube search discovery fallback (always finds fresh GTA 6 videos)
     if not candidates:
         query = random.choice(SEARCH_QUERIES)
         candidates = discover_via_ytdlp_search(query, limit=5)
@@ -301,7 +313,7 @@ def run_live_cycle() -> int:
         hook_mp3 = os.path.join(tmp, "hook.mp3")
         final_mp4 = os.path.join(tmp, "short_9x16.mp4")
 
-        download_clip_segment(chosen["video_id"], raw_mp4)
+        download_clip_segment(chosen["video_id"], raw_mp4, tmp)
         tts_file = synthesize_elevenlabs_hook(hook_text, hook_mp3)
         render_vertical_short(raw_mp4, tts_file, hook_text, final_mp4)
 
@@ -321,7 +333,7 @@ def run_self_test() -> int:
     </feed>"""
     vids = parse_youtube_rss(sample)
     assert len(vids) == 1 and vids[0]["video_id"] == "QdBZY2fkU-0"
-    print("SELF-TEST PASSED: RSS + yt-dlp auto-discovery + FFmpeg 9:16 + YouTube Shorts uploader ready.")
+    print("SELF-TEST PASSED: Multi-client yt-dlp + optional cookies + FFmpeg 9:16 + YouTube uploader ready.")
     return 0
 
 
