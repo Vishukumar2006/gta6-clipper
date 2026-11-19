@@ -6,11 +6,21 @@ Optimized for Android Termux & Low-Spec PCs:
   1. Discovers GTA 6 clips & stream slices from 26 global + Indian creators (0 API quota).
   2. Filters strictly for GTA 6 / GTA VI titles and blocks duplicates via uploaded_ids.txt.
   3. Pulls a 35s clip + YouTube auto-captions (.vtt) with yt-dlp and builds bouncing
+#!/usr/bin/env python3
+"""
+GTA 6 24/7 Pro-Edited Creator Auto-Clipper
+(Random 65% Music + Hook SFX + Visual FX + Pillow Neon UI + Viral Auto-Captions)
+================================================================================
+Optimized for Android Termux & Low-Spec PCs:
+  1. Discovers GTA 6 clips & stream slices from 26 global + Indian creators (0 API quota).
+  2. Filters strictly for GTA 6 / GTA VI titles and blocks duplicates via uploaded_ids.txt.
+  3. Pulls a 35s clip + YouTube auto-captions (.vtt) with yt-dlp and builds bouncing
      Hormozi-style yellow .ass word-pop subtitles (0 extra AI RAM).
   4. Draws CapCut-style rounded Vice City neon 3-second hook card & creator badge PNGs
-     via Python Pillow (gracefully falls back if Pillow isn't installed yet).
-  5. Renders 9:16 (1080x1920) via FFmpeg with color pop (eq), animated neon progress bar,
-     broadcast audio loudness (loudnorm), and uploads to YouTube Shorts via OAuth pool.
+     via Python Pillow.
+  5. Mixes a random copyright-free music track from music/ at 65% volume (with smooth fade)
+     + optional hook SFX from sfx/ + FFmpeg visual FX (white intro flash, color pop,
+     sharpening, cinema vignette) + broadcast loudnorm, then uploads to YouTube Shorts.
 """
 
 from __future__ import annotations
@@ -33,6 +43,15 @@ try:
     HAS_PILLOW = True
 except ImportError:
     HAS_PILLOW = False
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MUSIC_DIR = os.path.join(BASE_DIR, "music")
+SFX_DIR = os.path.join(BASE_DIR, "sfx")
+UPLOADED_DB_FILE = os.path.join(BASE_DIR, "uploaded_ids.txt")
+
+# Audio mix levels (65% background music by default; override via MUSIC_VOLUME env var)
+MUSIC_VOLUME = float(os.environ.get("MUSIC_VOLUME", "0.65"))
+SFX_VOLUME = float(os.environ.get("SFX_VOLUME", "0.85"))
 
 CREATOR_QUERIES = [
     # Global Mega Streamers & Gaming Creators
@@ -75,10 +94,26 @@ HOOK_TEMPLATES = [
     "THIS GTA 6 STREAM MOMENT BROKE THE INTERNET!",
 ]
 
-UPLOADED_DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploaded_ids.txt")
 GTA6_TITLE_RE = re.compile(r"\bgta\s*(6|vi)\b|grand\s+theft\s+auto\s*(6|vi)\b", re.IGNORECASE)
 CLIP_START_SEC = 15.0
 CLIP_DURATION_SEC = 35.0
+AUDIO_EXTS = (".mp3", ".wav", ".m4a", ".ogg", ".aac")
+
+
+def ensure_media_dirs() -> None:
+    os.makedirs(MUSIC_DIR, exist_ok=True)
+    os.makedirs(SFX_DIR, exist_ok=True)
+
+
+def pick_random_audio(folder: str) -> Optional[str]:
+    if not os.path.isdir(folder):
+        return None
+    files = [
+        os.path.join(folder, f)
+        for f in os.listdir(folder)
+        if f.lower().endswith(AUDIO_EXTS) and os.path.isfile(os.path.join(folder, f))
+    ]
+    return random.choice(files) if files else None
 
 
 def load_uploaded_ids() -> Set[str]:
@@ -123,24 +158,20 @@ def _load_pil_font(size: int):
 def create_pillow_overlays(hook_text: str, creator_name: str, tmp_dir: str) -> Tuple[Optional[str], Optional[str]]:
     """Generates CapCut-style transparent 1080x1920 PNG overlays (3s neon hook card + creator badge)."""
     if not HAS_PILLOW:
-        print("[PILLOW] Pillow not installed yet — run 'pkg install -y python-pillow' for neon hook cards.")
+        print("[PILLOW] Pillow not installed — run 'pkg install -y python-pillow' for neon hook cards.")
         return None, None
 
-    # 1. Neon GTA 6 3-Second Hook Card Overlay
     hook_img = Image.new("RGBA", (1080, 1920), (0, 0, 0, 0))
     draw = ImageDraw.Draw(hook_img)
 
     card_box = [70, 175, 1010, 415]
-    # Outer cyan glow stroke + inner Vice pink border + dark translucent body
     draw.rounded_rectangle([64, 169, 1016, 421], radius=34, fill=(0, 240, 255, 70))
     draw.rounded_rectangle(card_box, radius=30, fill=(11, 14, 24, 232), outline=(255, 42, 133, 255), width=6)
 
-    # Top pill tag
     draw.rounded_rectangle([320, 148, 760, 204], radius=24, fill=(255, 42, 133, 255))
     tag_font = _load_pil_font(28)
     draw.text((540, 176), "GTA 6 VIRAL MOMENT", fill=(255, 255, 255, 255), font=tag_font, anchor="mm")
 
-    # Wrapped Hook Headline
     hook_font = _load_pil_font(44)
     lines = textwrap.wrap(hook_text.upper(), width=26)[:3]
     y_start = 265 if len(lines) <= 2 else 242
@@ -150,7 +181,6 @@ def create_pillow_overlays(hook_text: str, creator_name: str, tmp_dir: str) -> T
     hook_png = os.path.join(tmp_dir, "hook_card.png")
     hook_img.save(hook_png, "PNG")
 
-    # 2. Persistent Creator Badge Overlay (Top-Left)
     badge_img = Image.new("RGBA", (1080, 1920), (0, 0, 0, 0))
     bdraw = ImageDraw.Draw(badge_img)
     safe_creator = "@" + re.sub(r"[^A-Za-z0-9_ ]+", "", creator_name or "GTA6Creator").strip()[:18]
@@ -182,7 +212,6 @@ def _sec_to_ass_time(sec: float) -> str:
 
 
 def convert_vtt_to_viral_ass(vtt_path: str, out_ass_path: str, clip_offset: float, max_dur: float) -> Optional[str]:
-    """Converts YouTube auto-captions (.vtt) into bouncing yellow Hormozi-style .ass subtitles."""
     if not os.path.exists(vtt_path):
         return None
     with open(vtt_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -216,7 +245,6 @@ def convert_vtt_to_viral_ass(vtt_path: str, out_ass_path: str, clip_offset: floa
         words = " ".join(text_lines).split()
         if not words:
             continue
-        # Break into punchy 3-word Hormozi bursts
         chunks = [words[i:i + 3] for i in range(0, len(words), 3)]
         step = max(0.25, (t1 - t0) / max(1, len(chunks)))
         for idx, ch in enumerate(chunks):
@@ -292,7 +320,6 @@ def discover_creator_gta6_videos(queries: List[str], uploaded_ids: Set[str]) -> 
 
 
 def download_clip_and_subs(video_id: str, tmp_dir: str) -> Tuple[str, Optional[str], float]:
-    """Downloads a 35s clip segment + English auto-captions (.vtt) using yt-dlp."""
     video_url = f"https://www.youtube.com/watch?v={video_id}"
     out_raw_mp4 = os.path.join(tmp_dir, "raw.mp4")
 
@@ -300,7 +327,7 @@ def download_clip_and_subs(video_id: str, tmp_dir: str) -> Tuple[str, Optional[s
         "yt-dlp",
         "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best",
         "--merge-output-format", "mp4",
-        "--download-sections", f"*0:00:15-0:00:50",
+        "--download-sections", "*0:00:15-0:00:50",
         "--force-keyframes-at-cuts",
         "--write-auto-subs", "--sub-lang", "en", "--sub-format", "vtt",
         "--no-playlist",
@@ -354,10 +381,12 @@ def render_vertical_short(
     hook_png: Optional[str],
     badge_png: Optional[str],
     ass_path: Optional[str],
+    music_path: Optional[str],
+    sfx_path: Optional[str],
     hook_text: str,
     out_mp4: str,
 ) -> str:
-    """Renders 9:16 pro Short: blurred BG, color-popped FG, Pillow neon overlays, .ass captions, progress bar & loudnorm."""
+    """Renders 9:16 pro Short with visual FX, Pillow overlays, .ass captions, 65% music & hook SFX."""
     cmd = ["ffmpeg", "-y", "-i", raw_mp4]
     next_idx = 1
 
@@ -379,20 +408,29 @@ def render_vertical_short(
         tts_idx = next_idx
         next_idx += 1
 
+    music_idx = None
+    if music_path and os.path.exists(music_path):
+        cmd.extend(["-stream_loop", "-1", "-i", music_path])
+        music_idx = next_idx
+        next_idx += 1
+        print(f"[MUSIC] Mixing random track '{os.path.basename(music_path)}' at {int(MUSIC_VOLUME * 100)}% volume.")
+
+    sfx_idx = None
+    if sfx_path and os.path.exists(sfx_path):
+        cmd.extend(["-i", sfx_path])
+        sfx_idx = next_idx
+        next_idx += 1
+        print(f"[SFX] Triggering hook effect '{os.path.basename(sfx_path)}' at {int(SFX_VOLUME * 100)}% volume.")
+
+    # Visual FX chain: blurred BG + color-popped & sharpened FG + cinema vignette + white intro flash
     filters = [
         "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=22:6,eq=brightness=-0.06[bg]",
-        "[0:v]scale=1080:-2,eq=contrast=1.08:saturation=1.22[fg]",
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2[v0]",
+        "[0:v]scale=1080:-2,eq=contrast=1.09:saturation=1.24,unsharp=5:5:0.7:5:5:0.0[fg]",
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2,vignette=PI/5,fade=t=in:st=0:d=0.35:color=white[v0]",
+        "[v0]drawbox=x=0:y=ih-16:w=iw:h=16:color=black@0.6:t=fill[vbarbg]",
     ]
-    cur_v = "v0"
-
-    # Animated neon pink watch-progress bar at bottom of Short
-    filters.append(
-        f"[{cur_v}]drawbox=x=0:y=ih-16:w=iw:h=16:color=black@0.6:t=fill[vbarbg]"
-    )
     cur_v = "vbarbg"
 
-    # Composite Pillow 3-second neon hook card (or fallback drawtext)
     if hook_png_idx is not None:
         filters.append(f"[{cur_v}][{hook_png_idx}:v]overlay=0:0:enable='between(t,0,3.5)'[vhook]")
         cur_v = "vhook"
@@ -406,35 +444,49 @@ def render_vertical_short(
         )
         cur_v = "vhook"
 
-    # Composite persistent Pillow Creator Badge
     if badge_png_idx is not None:
         filters.append(f"[{cur_v}][{badge_png_idx}:v]overlay=0:0[vbadge]")
         cur_v = "vbadge"
 
-    # Burn in bouncing yellow Hormozi-style .ass captions
     if ass_path and os.path.exists(ass_path):
         ass_esc = ass_path.replace("\\", "/").replace(":", "\\:")
         filters.append(f"[{cur_v}]ass='{ass_esc}'[vsub]")
         cur_v = "vsub"
 
-    # Audio chain with broadcast loudness normalization
+    # Multi-track audio mixer: Original Clip + Optional TTS + Random 65% Music + Optional Hook SFX
+    audio_inputs = ["[0:a]"]
     if tts_idx is not None:
-        filters.append(f"[{tts_idx}:a][0:a]amix=inputs=2:duration=longest,loudnorm=I=-14:TP=-1.5:LRA=11[outa]")
-        amap = "[outa]"
+        filters.append(f"[{tts_idx}:a]volume=1.15[atts]")
+        audio_inputs.append("[atts]")
+    if music_idx is not None:
+        fade_out_start = max(1.0, CLIP_DURATION_SEC - 2.0)
+        filters.append(
+            f"[{music_idx}:a]volume={MUSIC_VOLUME:.2f},afade=t=in:st=0:d=0.6,"
+            f"afade=t=out:st={fade_out_start:.1f}:d=2.0[amusic]"
+        )
+        audio_inputs.append("[amusic]")
+    if sfx_idx is not None:
+        filters.append(f"[{sfx_idx}:a]adelay=100|100,volume={SFX_VOLUME:.2f}[asfx]")
+        audio_inputs.append("[asfx]")
+
+    if len(audio_inputs) > 1:
+        filters.append(
+            f"{''.join(audio_inputs)}amix=inputs={len(audio_inputs)}:duration=first:dropout_transition=2,"
+            "loudnorm=I=-14:TP=-1.5:LRA=11[outa]"
+        )
     else:
         filters.append("[0:a]loudnorm=I=-14:TP=-1.5:LRA=11[outa]")
-        amap = "[outa]"
 
     cmd.extend([
         "-t", str(int(CLIP_DURATION_SEC)),
         "-filter_complex", ";".join(filters),
         "-map", f"[{cur_v}]",
-        "-map", amap,
+        "-map", "[outa]",
         "-c:v", "libx264", "-preset", "ultrafast", "-threads", "2", "-crf", "23",
         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-r", "30",
         out_mp4,
     ])
-    print("[FFMPEG] Rendering pro 9:16 Short (Pillow neon card + color pop + viral captions + loudnorm)...")
+    print("[FFMPEG] Rendering pro 9:16 Short (Flash + Vignette + Color Pop + 65% Music + Captions)...")
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0 or not os.path.exists(out_mp4):
         raise RuntimeError(f"FFmpeg render failed: {proc.stderr[-500:]}")
@@ -527,6 +579,7 @@ def load_token_pool() -> List[Dict[str, str]]:
 
 
 def run_live_cycle() -> int:
+    ensure_media_dirs()
     token_pool = load_token_pool()
     uploaded_ids = load_uploaded_ids()
 
@@ -539,6 +592,8 @@ def run_live_cycle() -> int:
 
     chosen = random.choice(candidates)
     hook_text = random.choice(HOOK_TEMPLATES)
+    music_track = pick_random_audio(MUSIC_DIR)
+    sfx_track = pick_random_audio(SFX_DIR)
     print(f"[SELECTED] Creator: {chosen['channel']} | Video: {chosen['title']} ({chosen['video_id']})")
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -548,7 +603,10 @@ def run_live_cycle() -> int:
         tts_file = synthesize_elevenlabs_hook(hook_text, os.path.join(tmp, "hook.mp3"))
         final_mp4 = os.path.join(tmp, "short_9x16.mp4")
 
-        render_vertical_short(raw_mp4, tts_file, hook_png, badge_png, ass_path, hook_text, final_mp4)
+        render_vertical_short(
+            raw_mp4, tts_file, hook_png, badge_png, ass_path,
+            music_track, sfx_track, hook_text, final_mp4
+        )
 
         desc = (
             f"{hook_text}\n\n"
@@ -562,20 +620,22 @@ def run_live_cycle() -> int:
 
 
 def run_self_test() -> int:
+    ensure_media_dirs()
     assert is_gta6_video("IShowSpeed reacts to GTA 6 Gameplay!")
     assert not is_gta6_video("RoadCraft - Constructing an Overpass")
     with tempfile.TemporaryDirectory() as tmp:
-        # Test Pillow Neon Hook Card & Creator Badge generation
         hp, bp = create_pillow_overlays("WAIT FOR HIS REACTION TO GTA 6...", "IShowSpeed", tmp)
         assert hp and os.path.exists(hp) and bp and os.path.exists(bp), "Pillow PNG render failed"
-        # Test VTT -> Viral .ASS Subtitle conversion
         vtt_sample = os.path.join(tmp, "sample.vtt")
         with open(vtt_sample, "w", encoding="utf-8") as f:
             f.write("WEBVTT\n\n00:00:16.000 --> 00:00:18.500\nBro no way Rockstar actually added this to GTA 6!\n")
         ass_out = convert_vtt_to_viral_ass(vtt_sample, os.path.join(tmp, "viral.ass"), 15.0, 35.0)
         assert ass_out and os.path.exists(ass_out), "VTT to ASS conversion failed"
-        # Test real 2-second FFmpeg composite with Pillow PNGs + ASS + Color Pop + Loudnorm
+
+        # Synthesize 2s video + 2s background music + 0.5s hook SFX to test full multi-track mixer
         synth_in = os.path.join(tmp, "in.mp4")
+        synth_music = os.path.join(tmp, "bg_music.mp3")
+        synth_sfx = os.path.join(tmp, "hook_whoosh.mp3")
         synth_out = os.path.join(tmp, "out.mp4")
         subprocess.run(
             ["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=1280x720:rate=30",
@@ -583,9 +643,20 @@ def run_self_test() -> int:
              "-c:a", "aac", synth_in],
             check=True, capture_output=True,
         )
-        render_vertical_short(synth_in, None, hp, bp, ass_out, "WAIT FOR HIS REACTION TO GTA 6...", synth_out)
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=220:duration=2", "-c:a", "libmp3lame", synth_music],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=880:duration=0.4", "-c:a", "libmp3lame", synth_sfx],
+            check=True, capture_output=True,
+        )
+        render_vertical_short(
+            synth_in, None, hp, bp, ass_out, synth_music, synth_sfx,
+            "WAIT FOR HIS REACTION TO GTA 6...", synth_out
+        )
         assert os.path.exists(synth_out) and os.path.getsize(synth_out) > 10000
-    print("ALL PRO-EDITING SELF-TESTS PASSED: Pillow PNGs + Viral .ASS Captions + FFmpeg Color Pop & Loudnorm verified!")
+    print("ALL PRO-FX & 65% MUSIC SELF-TESTS PASSED: Visual FX + 65% Music + Hook SFX + Pillow + Viral Captions verified!")
     return 0
 
 
@@ -593,7 +664,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="GTA 6 24/7 Pro-Edited Creator Auto-Clipper")
     parser.add_argument("--daily-target", type=int, default=16, help="Daily Shorts target")
     parser.add_argument("--once", action="store_true", help="Run one live clip & upload cycle")
-    parser.add_argument("--self-test", action="store_true", help="Run full end-to-end FFmpeg & Pillow self-test")
+    parser.add_argument("--self-test", action="store_true", help="Run full end-to-end FFmpeg, Music & Pillow self-test")
     args = parser.parse_args()
 
     if args.self_test:
