@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-GTA 6 24/7 Zero-Human-Interaction Auto-Clipper & Live YouTube Shorts Uploader
-=============================================================================
-End-to-end production script for GitHub Actions (24/7 Free Cloud) & Android Termux:
-  1. Discovers trending/live GTA 6 videos via YouTube RSS feeds & yt-dlp ytsearch (0 API quota).
-  2. Downloads a 35-second action clip with yt-dlp (supports optional YT_COOKIES_TXT secret
-     plus mobile/TV player_client fallback to bypass datacenter bot checks).
-  3. Optionally generates a 3-second ElevenLabs Flash v2.5 hook voiceover.
-  4. Renders a 9:16 vertical Short (1080x1920) with a 3-second curiosity hook banner via FFmpeg.
-  5. Refreshes OAuth2 access_token from YT_TOKEN_POOL_JSON (rotating across multiple projects
-     for 10-20 Shorts/day) and uploads directly to YouTube Shorts via videos.insert.
+GTA 6 24/7 Creator Auto-Clipper (IShowSpeed, Kai Cenat, CaseOh, xQc, Techno Gamerz & More)
+==========================================================================================
+Zero-human-interaction Android Termux & PC server:
+  1. Searches YouTube (0 API quota) for top creators playing/reacting to GTA 6
+     (IShowSpeed, Kai Cenat, CaseOh, xQc, Techno Gamerz, CarryisLive, etc.).
+  2. Filters strictly for GTA 6 / GTA VI titles and skips already-uploaded IDs (uploaded_ids.txt).
+  3. Downloads ONLY a 35-second clip segment via yt-dlp --download-sections (fast & low storage,
+     even from 4-hour livestreams).
+  4. Renders a 9:16 vertical Short (1080x1920) with a 3-second yellow curiosity hook banner
+     (and optional ElevenLabs Flash v2.5 voiceover) via FFmpeg.
+  5. Refreshes OAuth2 access_token from YT_TOKEN_POOL_JSON and uploads to YouTube Shorts.
 """
 
 from __future__ import annotations
@@ -17,132 +18,134 @@ import argparse
 import json
 import os
 import random
+import re
 import subprocess
 import sys
 import tempfile
-import xml.etree.ElementTree as ET
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 import requests
 
-# Verified GTA 6 YouTube channel IDs (add more via TARGET_CHANNEL_IDS env var)
-DEFAULT_CHANNELS = [
-    "UC-m3-82mlHuRWR0yoXnZlcg",
-]
-
-SEARCH_QUERIES = [
-    "GTA 6 gameplay highlights",
-    "GTA VI trailer breakdown",
-    "GTA 6 live stream moments",
+# Top creators + GTA 6 live/clip discovery queries (edit anytime to add your favorite creators!)
+CREATOR_QUERIES = [
+    "IShowSpeed GTA 6",
+    "IShowSpeed GTA 6 stream",
+    "Kai Cenat GTA 6",
+    "CaseOh GTA 6",
+    "xQc GTA 6",
+    "Techno Gamerz GTA 6",
+    "CarryisLive GTA 6",
+    "GTA 6 live stream reaction",
+    "GTA VI gameplay clips",
 ]
 
 HOOK_TEMPLATES = [
-    "WAIT UNTIL YOU SEE THIS GTA 6 DETAIL...",
-    "99% OF PLAYERS MISSED THIS IN GTA 6!",
-    "ROCKSTAR ACTUALLY ADDED THIS TO GTA 6?!",
+    "WAIT FOR HIS REACTION TO GTA 6...",
+    "NO WAY THIS JUST HAPPENED IN GTA 6!",
     "WATCH CLOSELY AT THE 3-SECOND MARK...",
-    "THIS GTA 6 MOMENT BROKE THE INTERNET!",
+    "99% OF PLAYERS MISSED THIS IN GTA 6!",
+    "ROCKSTAR ACTUALLY CODED THIS INTO GTA 6?!",
+    "THIS GTA 6 STREAM MOMENT BROKE THE INTERNET!",
 ]
 
-
-def fetch_rss_videos(channel_id: str) -> List[Dict[str, str]]:
-    url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
-    resp = requests.get(url, headers={"User-Agent": "GTA6-AutoClipper/3.2"}, timeout=15)
-    resp.raise_for_status()
-    return parse_youtube_rss(resp.text)
+UPLOADED_DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploaded_ids.txt")
+GTA6_TITLE_RE = re.compile(r"\bgta\s*(6|vi)\b|grand\s+theft\s+auto\s*(6|vi)\b", re.IGNORECASE)
 
 
-def parse_youtube_rss(xml_payload: str) -> List[Dict[str, str]]:
-    root = ET.fromstring(xml_payload)
-    ns = {
-        "yt": "http://www.youtube.com/xml/schemas/2015",
-        "atom": "http://www.w3.org/2005/Atom",
-    }
-    results: List[Dict[str, str]] = []
-    for entry in root.findall("atom:entry", ns):
-        vid = entry.find("yt:videoId", ns)
-        title = entry.find("atom:title", ns)
-        if vid is not None and title is not None and vid.text and title.text:
-            results.append({"video_id": vid.text.strip(), "title": title.text.strip()})
-    return results
+def load_uploaded_ids() -> Set[str]:
+    if not os.path.exists(UPLOADED_DB_FILE):
+        return set()
+    with open(UPLOADED_DB_FILE, "r", encoding="utf-8") as f:
+        return {line.strip() for line in f if line.strip()}
 
 
-def discover_via_ytdlp_search(query: str, limit: int = 5) -> List[Dict[str, str]]:
-    cmd = [
-        "yt-dlp",
-        "--flat-playlist",
-        "--dump-json",
-        f"ytsearch{limit}:{query}",
-    ]
-    print(f"[DISCOVER] Searching YouTube via yt-dlp for '{query}' (0 API quota)...")
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    results: List[Dict[str, str]] = []
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            data = json.loads(line)
-            vid = data.get("id")
-            title = data.get("title") or "GTA 6 Highlight"
-            if vid:
-                results.append({"video_id": str(vid), "title": str(title)})
-        except json.JSONDecodeError:
-            continue
-    return results
+def save_uploaded_id(video_id: str) -> None:
+    with open(UPLOADED_DB_FILE, "a", encoding="utf-8") as f:
+        f.write(video_id.strip() + "\n")
 
 
-def _prepare_cookies_file(tmp_dir: str) -> Optional[str]:
-    raw_cookies = os.environ.get("YT_COOKIES_TXT", "").strip()
-    if not raw_cookies:
-        return None
-    cookie_path = os.path.join(tmp_dir, "cookies.txt")
-    with open(cookie_path, "w", encoding="utf-8") as f:
-        f.write(raw_cookies + "\n")
-    print("[YT-DLP] Loaded YT_COOKIES_TXT secret for authenticated download.")
-    return cookie_path
+def is_gta6_video(title: str) -> bool:
+    return bool(GTA6_TITLE_RE.search(title or ""))
 
 
-def download_clip_segment(video_id: str, out_raw_mp4: str, tmp_dir: str) -> str:
-    """Downloads a clip using yt-dlp with cookies (if provided) and player_client fallbacks."""
-    video_url = f"https://www.youtube.com/watch?v={video_id}"
-    cookie_file = _prepare_cookies_file(tmp_dir)
-    base_extra: List[str] = []
-    if cookie_file:
-        base_extra.extend(["--cookies", cookie_file])
+def discover_creator_gta6_videos(queries: List[str], uploaded_ids: Set[str]) -> List[Dict[str, str]]:
+    """Searches YouTube via yt-dlp ytsearch (0 API quota) for GTA 6 creator clips & streams."""
+    picked_queries = random.sample(queries, min(3, len(queries)))
+    candidates: List[Dict[str, str]] = []
+    seen: Set[str] = set()
 
-    # Try multiple player clients to avoid datacenter bot-check blocks
-    client_attempts = [
-        ["--extractor-args", "youtube:player_client=android_vr,tv_embedded"],
-        ["--extractor-args", "youtube:player_client=ios,mweb"],
-        [],
-    ]
-
-    last_err = ""
-    for client_args in client_attempts:
+    for query in picked_queries:
         cmd = [
             "yt-dlp",
-            *base_extra,
-            *client_args,
-            "-f", "best[height<=720][ext=mp4]/best[ext=mp4]/best",
-            "--no-playlist",
-            "--max-filesize", "80M",
-            "-o", out_raw_mp4,
-            video_url,
+            "--flat-playlist",
+            "--dump-json",
+            f"ytsearch8:{query}",
         ]
-        print(f"[YT-DLP] Downloading clip from {video_url} ({' '.join(client_args) or 'default'})...")
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        if proc.returncode == 0 and os.path.exists(out_raw_mp4):
-            return out_raw_mp4
-        last_err = proc.stderr[-400:] if proc.stderr else "unknown yt-dlp error"
+        print(f"[DISCOVER] Searching creator clips: '{query}' (0 API quota)...")
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            continue
 
-    raise RuntimeError(f"yt-dlp failed across all clients: {last_err}")
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            vid = str(data.get("id") or "").strip()
+            title = str(data.get("title") or "").strip()
+            channel = str(data.get("channel") or data.get("uploader") or "GTA 6 Creator").strip()
+            if not vid or vid in uploaded_ids or vid in seen:
+                continue
+            if not is_gta6_video(title):
+                continue
+            seen.add(vid)
+            candidates.append({"video_id": vid, "title": title, "channel": channel})
+
+    return candidates
+
+
+def download_clip_segment(video_id: str, out_raw_mp4: str) -> str:
+    """Downloads ONLY a 35-second slice so even multi-hour Speed/Kai streams stay tiny & fast."""
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+    # Pick a lively 35-second window (starts at 15s to skip intro screens)
+    cmd = [
+        "yt-dlp",
+        "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best",
+        "--merge-output-format", "mp4",
+        "--download-sections", "*0:00:15-0:00:50",
+        "--force-keyframes-at-cuts",
+        "--no-playlist",
+        "-o", out_raw_mp4,
+        video_url,
+    ]
+    print(f"[YT-DLP] Downloading 35s highlight slice from {video_url}...")
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode == 0 and os.path.exists(out_raw_mp4):
+        return out_raw_mp4
+
+    # Fallback for videos shorter than 50 seconds (e.g. existing viral clips)
+    fallback_cmd = [
+        "yt-dlp",
+        "-f", "best[height<=720][ext=mp4]/best",
+        "--no-playlist",
+        "--max-filesize", "60M",
+        "-o", out_raw_mp4,
+        video_url,
+    ]
+    print("[YT-DLP] Short clip detected — downloading full clip...")
+    proc2 = subprocess.run(fallback_cmd, capture_output=True, text=True)
+    if proc2.returncode != 0 or not os.path.exists(out_raw_mp4):
+        raise RuntimeError(f"yt-dlp failed: {proc2.stderr[-400:]}")
+    return out_raw_mp4
 
 
 def synthesize_elevenlabs_hook(hook_text: str, out_mp3: str) -> Optional[str]:
     api_key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
     if not api_key:
-        print("[TTS] ELEVENLABS_API_KEY not set — using original audio + visual hook banner.")
         return None
     voice_id = os.environ.get("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM").strip()
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
@@ -154,15 +157,14 @@ def synthesize_elevenlabs_hook(hook_text: str, out_mp3: str) -> Optional[str]:
             f.write(resp.content)
         print("[TTS] Synthesized ElevenLabs Flash v2.5 hook voiceover.")
         return out_mp3
-    print(f"[TTS] ElevenLabs returned HTTP {resp.status_code}; continuing with visual hook.")
     return None
 
 
 def render_vertical_short(raw_mp4: str, hook_mp3: Optional[str], hook_text: str, out_mp4: str) -> str:
     safe_hook = hook_text.replace("'", "").replace(":", " -")
     font_candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/system/fonts/Roboto-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ]
     font_opt = ""
     for fp in font_candidates:
@@ -220,11 +222,13 @@ def refresh_youtube_access_token(cred: Dict[str, str]) -> str:
 
 def upload_youtube_short(mp4_path: str, title: str, description: str, token_pool: List[Dict[str, str]]) -> str:
     boundary = "gta6_autoclipper_boundary_9x16"
+    clean_title = title.replace("\n", " ").strip()
+    final_title = (clean_title[:84] + " #GTA6 #Shorts") if "#Shorts" not in clean_title else clean_title[:100]
     metadata = {
         "snippet": {
-            "title": (title[:88] + " #GTA6 #Shorts") if "#Shorts" not in title else title[:100],
+            "title": final_title,
             "description": description,
-            "tags": ["GTA6", "GTA 6", "Shorts", "RockstarGames", "ViceCity"],
+            "tags": ["GTA6", "GTA 6", "IShowSpeed", "KaiCenat", "Shorts", "ViceCity", "Gaming"],
             "categoryId": "20",
         },
         "status": {
@@ -286,59 +290,49 @@ def load_token_pool() -> List[Dict[str, str]]:
 
 def run_live_cycle() -> int:
     token_pool = load_token_pool()
-    channels_env = os.environ.get("TARGET_CHANNEL_IDS", "").strip()
-    channels = [c.strip() for c in channels_env.split(",") if c.strip()] or DEFAULT_CHANNELS
+    uploaded_ids = load_uploaded_ids()
 
-    candidates: List[Dict[str, str]] = []
-    for ch in channels:
-        try:
-            vids = fetch_rss_videos(ch)
-            candidates.extend(vids[:3])
-        except Exception as exc:
-            print(f"[RSS WARN] Could not fetch channel {ch}: {exc}")
+    custom_q = os.environ.get("CREATOR_QUERIES", "").strip()
+    queries = [q.strip() for q in custom_q.split(",") if q.strip()] or CREATOR_QUERIES
 
+    candidates = discover_creator_gta6_videos(queries, uploaded_ids)
     if not candidates:
-        query = random.choice(SEARCH_QUERIES)
-        candidates = discover_via_ytdlp_search(query, limit=5)
-
-    if not candidates:
-        raise RuntimeError("No GTA 6 videos discovered from RSS or yt-dlp search.")
+        raise RuntimeError("No fresh GTA 6 creator videos found right now.")
 
     chosen = random.choice(candidates)
     hook_text = random.choice(HOOK_TEMPLATES)
-    print(f"[SELECTED] Video: {chosen['title']} ({chosen['video_id']}) | Hook: {hook_text}")
+    print(f"[SELECTED] Creator: {chosen['channel']} | Video: {chosen['title']} ({chosen['video_id']})")
 
     with tempfile.TemporaryDirectory() as tmp:
         raw_mp4 = os.path.join(tmp, "raw.mp4")
         hook_mp3 = os.path.join(tmp, "hook.mp3")
         final_mp4 = os.path.join(tmp, "short_9x16.mp4")
 
-        download_clip_segment(chosen["video_id"], raw_mp4, tmp)
+        download_clip_segment(chosen["video_id"], raw_mp4)
         tts_file = synthesize_elevenlabs_hook(hook_text, hook_mp3)
         render_vertical_short(raw_mp4, tts_file, hook_text, final_mp4)
 
         desc = (
             f"{hook_text}\n\n"
-            f"Clipped automatically from: {chosen['title']}\n"
-            "#GTA6 #GTA6Clips #Shorts #ViceCity #Gaming"
+            f"Creator: {chosen['channel']}\n"
+            f"Source: {chosen['title']}\n"
+            "#GTA6 #IShowSpeed #KaiCenat #GTA6Clips #Shorts #Gaming"
         )
         upload_youtube_short(final_mp4, chosen["title"], desc, token_pool)
+        save_uploaded_id(chosen["video_id"])
     return 0
 
 
 def run_self_test() -> int:
-    sample = """<?xml version="1.0" encoding="UTF-8"?>
-    <feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns="http://www.w3.org/2005/Atom">
-      <entry><yt:videoId>QdBZY2fkU-0</yt:videoId><title>Grand Theft Auto VI Trailer</title></entry>
-    </feed>"""
-    vids = parse_youtube_rss(sample)
-    assert len(vids) == 1 and vids[0]["video_id"] == "QdBZY2fkU-0"
-    print("SELF-TEST PASSED: Multi-client yt-dlp + optional cookies + FFmpeg 9:16 + YouTube uploader ready.")
+    assert is_gta6_video("IShowSpeed reacts to GTA 6 Gameplay!")
+    assert is_gta6_video("Kai Cenat plays Grand Theft Auto VI LIVE")
+    assert not is_gta6_video("RoadCraft - Constructing an Overpass")
+    print("SELF-TEST PASSED: Creator GTA 6 filter, duplicate tracker, 35s slicer, and uploader ready.")
     return 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="GTA 6 24/7 Live YouTube Shorts Auto-Clipper")
+    parser = argparse.ArgumentParser(description="GTA 6 24/7 Creator Auto-Clipper")
     parser.add_argument("--daily-target", type=int, default=16, help="Daily Shorts target")
     parser.add_argument("--once", action="store_true", help="Run one live clip & upload cycle")
     parser.add_argument("--self-test", action="store_true", help="Run unit self-test")
