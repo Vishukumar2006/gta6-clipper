@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
 """
-GTA 6 24/7 Pro-Edited Creator Auto-Clipper (Pillow Neon UI + Viral Auto-Captions + FFmpeg Polish)
-=================================================================================================
-Optimized for Android Termux & Low-Spec PCs:
-  1. Discovers GTA 6 clips & stream slices from 26 global + Indian creators (0 API quota).
-  2. Filters strictly for GTA 6 / GTA VI titles and blocks duplicates via uploaded_ids.txt.
-  3. Pulls a 35s clip + YouTube auto-captions (.vtt) with yt-dlp and builds bouncing
-#!/usr/bin/env python3
-"""
 GTA 6 24/7 Pro-Edited Creator Auto-Clipper
 (Random 65% Music + Hook SFX + Visual FX + Pillow Neon UI + Viral Auto-Captions)
 ================================================================================
