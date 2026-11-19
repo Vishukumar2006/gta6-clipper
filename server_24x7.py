@@ -28,14 +28,34 @@ import requests
 
 # Top creators + GTA 6 live/clip discovery queries (edit anytime to add your favorite creators!)
 CREATOR_QUERIES = [
+    # Global Mega Streamers & Gaming Creators
     "IShowSpeed GTA 6",
     "IShowSpeed GTA 6 stream",
     "Kai Cenat GTA 6",
     "CaseOh GTA 6",
     "xQc GTA 6",
+    "Jynxzi GTA 6",
+    "Adin Ross GTA 6",
+    "Fanum GTA 6",
+    "MoistCr1TiKaL GTA 6",
+    "Asmongold GTA 6",
+    "Markiplier GTA 6",
+    "Jacksepticeye GTA 6",
+    "Typical Gamer GTA 6",
+    "DarkViperAU GTA 6",
+    "theRadBrad GTA 6",
+    "SypherPK GTA 6",
+    # Top Indian Gaming Creators
     "Techno Gamerz GTA 6",
     "CarryisLive GTA 6",
+    "Mythpat GTA 6",
+    "Triggered Insaan GTA 6",
+    "BeastBoyShub GTA 6",
+    "GamerFleet GTA 6",
+    "ScoutOP GTA 6",
+    # General Viral GTA 6 Live Streams & Moments
     "GTA 6 live stream reaction",
+    "GTA 6 funniest moments",
     "GTA VI gameplay clips",
 ]
 
